@@ -1,11 +1,8 @@
-transformers
-sentence-transformers
-fastembed
-qdrant-client
+openai-agents
 streamlit
-torch
-torchaudio
+qdrant-client
+fastembed
 langchain
 langchain-community
-pdfminer.six
-pymupdf
+langchain-openai
+transformers

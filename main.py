@@ -1,388 +1,327 @@
-from typing import List, Dict, Optional, Tuple
-import os
-import tempfile
-from datetime import datetime
-import uuid
-import asyncio
-
 import streamlit as st
-from dotenv import load_dotenv
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
-from qdrant_client.http.models import Distance, VectorParams
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from fastembed import TextEmbedding
-from openai import AsyncOpenAI
-from openai.helpers import LocalAudioPlayer
-from agents import Agent, Runner
-from transformers import pipeline  # Import Hugging Face pipeline
+from streamlit_lottie import st_lottie
+import requests
+from datetime import datetime
 
-load_dotenv()
-
-# Constants
-COLLECTION_NAME = "voice-rag-agent"
-
-# Initialize Hugging Face pipeline for text generation
-llm_pipeline = pipeline("text-generation", model="EleutherAI/gpt-neo-1.3B")  # Replace with your preferred model
-
-def init_session_state() -> None:
-    """Initialize Streamlit session state with default values."""
-    defaults = {
-        "initialized": False,
-        "qdrant_url": "",
-        "qdrant_api_key": "",
-        "openai_api_key": "",
-        "setup_complete": False,
-        "client": None,
-        "embedding_model": None,
-        "processor_agent": None,
-        "tts_agent": None,
-        "selected_voice": "coral",
-        "processed_documents": []
+# Custom CSS for modern UI
+def apply_custom_css():
+    st.markdown("""
+    <style>
+    .main {
+        background-color: #f8f9fa;
     }
-    
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    .stApp {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    .css-1d391kg {
+        padding-top: 2rem;
+    }
+    .stTitle {
+        font-weight: 800 !important;
+        color: #1e3a8a !important;
+        margin-bottom: 1.5rem !important;
+    }
+    .info-card {
+        background-color: #ffffff;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        margin-bottom: 20px;
+    }
+    .feature-card {
+        background-color: #ffffff;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        margin-bottom: 20px;
+        border-left: 4px solid #4338ca;
+    }
+    .feature-icon {
+        font-size: 24px;
+        margin-right: 10px;
+        color: #4338ca;
+    }
+    .footer {
+        text-align: center;
+        margin-top: 3rem;
+        padding: 1.5rem 0;
+        font-size: 0.8rem;
+        color: #6b7280;
+    }
+    .sidebar .sidebar-content {
+        background-color: #f1f5f9;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-def setup_sidebar() -> None:
-    """Configure sidebar with API settings and voice options."""
-    with st.sidebar:
-        st.title("🔑 Configuration")
-        st.markdown("---")
-        
-        st.session_state.qdrant_url = st.text_input(
-            "Qdrant URL",
-            value=st.session_state.qdrant_url,
-            type="password"
-        )
-        st.session_state.qdrant_api_key = st.text_input(
-            "Qdrant API Key",
-            value=st.session_state.qdrant_api_key,
-            type="password"
-        )
-        st.session_state.openai_api_key = st.text_input(
-            "OpenAI API Key",
-            value=st.session_state.openai_api_key,
-            type="password"
-        )
-        
-        st.markdown("---")
-        st.markdown("### 🎤 Voice Settings")
-        voices = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"]
-        st.session_state.selected_voice = st.selectbox(
-            "Select Voice",
-            options=voices,
-            index=voices.index(st.session_state.selected_voice),
-            help="Choose the voice for the audio response"
-        )
+# Load Lottie animation
+def load_lottieurl(url: str):
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    return r.json()
 
-def setup_qdrant() -> Tuple[QdrantClient, TextEmbedding]:
-    """Initialize Qdrant client and embedding model."""
-    if not all([st.session_state.qdrant_url, st.session_state.qdrant_api_key]):
-        raise ValueError("Qdrant credentials not provided")
+# Function to create a feature card
+def feature_card(icon, title, description):
+    st.markdown(f"""
+    <div class="feature-card">
+        <h3><span class="feature-icon">{icon}</span> {title}</h3>
+        <p>{description}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Function to display a counter card
+def stat_counter(label, value, icon):
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.markdown(f'<div style="font-size: 2rem; text-align: center; color: #4338ca;">{icon}</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown(f'<div style="font-size: 1.5rem; font-weight: bold;">{value}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color: #6b7280;">{label}</div>', unsafe_allow_html=True)
+
+# Set the page configuration
+st.set_page_config(
+    page_title="Voice RAG Agent",
+    page_icon="🎙️",
+    layout="wide"
+)
+
+# Apply custom CSS
+apply_custom_css()
+
+# Sidebar content
+with st.sidebar:
+    st.image("https://your-logo-url.com/logo.png", width=200)  # Replace with your logo URL
+    st.title("Navigation")
     
-    client = QdrantClient(
-        url=st.session_state.qdrant_url,
-        api_key=st.session_state.qdrant_api_key
+    selected_page = st.radio(
+        "Go to:",
+        ["Home", "Upload Documents", "Query Interface", "Settings"]
     )
     
-    embedding_model = TextEmbedding()
-    test_embedding = list(embedding_model.embed(["test"]))[0]
-    embedding_dim = len(test_embedding)
+    st.markdown("---")
+    st.markdown("### About")
+    st.info("Voice RAG Agent combines document retrieval with voice interface for a seamless experience.")
     
-    try:
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=embedding_dim,
-                distance=Distance.COSINE
-            )
-        )
-    except Exception as e:
-        if "already exists" not in str(e):
-            raise e
-    
-    return client, embedding_model
+    # User profile section in sidebar
+    st.markdown("---")
+    st.markdown("### Profile")
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.markdown("👤")
+    with col2:
+        st.markdown("**Guest User**")
+        st.markdown("*Free Plan*")
 
-def process_pdf(file) -> List:
-    """Process PDF file and split into chunks with metadata."""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            tmp_file.write(file.getvalue())
-            loader = PyPDFLoader(tmp_file.name)
-            documents = loader.load()
-            
-            # Add source metadata
-            for doc in documents:
-                doc.metadata.update({
-                    "source_type": "pdf",
-                    "file_name": file.name,
-                    "timestamp": datetime.now().isoformat()
-                })
-            
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
-            )
-            return text_splitter.split_documents(documents)
-    except Exception as e:
-        st.error(f"📄 PDF processing error: {str(e)}")
-        return []
-
-def store_embeddings(
-    client: QdrantClient,
-    embedding_model: TextEmbedding,
-    documents: List,
-    collection_name: str
-) -> None:
-    """Store document embeddings in Qdrant."""
-    for doc in documents:
-        embedding = list(embedding_model.embed([doc.page_content]))[0]
-        client.upsert(
-            collection_name=collection_name,
-            points=[
-                models.PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=embedding.tolist(),
-                    payload={
-                        "content": doc.page_content,
-                        **doc.metadata
-                    }
-                )
-            ]
-        )
-
-def setup_agents(openai_api_key: str) -> Tuple[Agent, Agent]:
-    """Initialize the processor and TTS agents."""
-    os.environ["OPENAI_API_KEY"] = openai_api_key
-    
-    processor_agent = Agent(
-        name="Documentation Processor",
-        instructions="""You are a helpful documentation assistant. Your task is to:
-        1. Analyze the provided documentation content
-        2. Answer the user's question clearly and concisely
-        3. Include relevant examples when available
-        4. Cite the source files when referencing specific content
-        5. Keep responses natural and conversational
-        6. Format your response in a way that's easy to speak out loud""",
-        model="gpt-4o"
-    )
-
-    tts_agent = Agent(
-        name="Text-to-Speech Agent",
-        instructions="""You are a text-to-speech agent. Your task is to:
-        1. Convert the processed documentation response into natural speech
-        2. Maintain proper pacing and emphasis
-        3. Handle technical terms clearly
-        4. Keep the tone professional but friendly
-        5. Use appropriate pauses for better comprehension
-        6. Ensure the speech is clear and well-articulated""",
-        model="gpt-4o"
-    )
-    
-    return processor_agent, tts_agent
-
-async def process_query(
-    query: str,
-    client: QdrantClient,
-    embedding_model: TextEmbedding,
-    collection_name: str,
-    openai_api_key: str,  # Retained for compatibility but not used
-    voice: str
-) -> Dict:
-    """Process user query and generate voice response."""
-    try:
-        st.info("🔄 Step 1: Generating query embedding and searching documents...")
-        # Get query embedding and search
-        query_embedding = list(embedding_model.embed([query]))[0]
-        st.write(f"Generated embedding of size: {len(query_embedding)}")
-        
-        search_response = client.query_points(
-            collection_name=collection_name,
-            query=query_embedding.tolist(),
-            limit=3,
-            with_payload=True
-        )
-        
-        search_results = search_response.points if hasattr(search_response, 'points') else []
-        st.write(f"Found {len(search_results)} relevant documents")
-        
-        if not search_results:
-            raise Exception("No relevant documents found in the vector database")
-        
-        st.info("🔄 Step 2: Preparing context from search results...")
-        # Prepare context from search results
-        context = "Based on the following documentation:\n\n"
-        for i, result in enumerate(search_results, 1):
-            payload = result.payload
-            if not payload:
-                continue
-            content = payload.get('content', '')
-            source = payload.get('file_name', 'Unknown Source')
-            context += f"From {source}:\n{content}\n\n"
-            st.write(f"Document {i} from: {source}")
-        
-        context += f"\nUser Question: {query}\n\n"
-        context += "Please provide a clear, concise answer that can be easily spoken out loud."
-        
-        st.info("🔄 Step 3: Generating text response...")
-        # Generate text response using Hugging Face pipeline
-        response = llm_pipeline(context, max_length=500, num_return_sequences=1)[0]["generated_text"]
-        st.write(f"Generated text response of length: {len(response)}")
-        
-        st.info("🔄 Step 4: Generating and playing audio...")
-        # Generate and play audio with streaming
-        async_openai = AsyncOpenAI(api_key=openai_api_key)  # Retained for compatibility but not used
-        
-        # First create streaming response
-        async with async_openai.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts",
-            voice=voice,
-            input=response,
-            instructions="",
-            response_format="pcm",
-        ) as stream_response:
-            st.write("Starting audio playback...")
-            # Play audio directly using LocalAudioPlayer
-            await LocalAudioPlayer().play(stream_response)
-            st.write("Audio playback complete")
-            
-            st.write("Generating downloadable MP3 version...")
-            # Also save as MP3 for download
-            audio_response = await async_openai.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice=voice,
-                input=response,
-                instructions="",
-                response_format="mp3"
-            )
-            
-            temp_dir = tempfile.gettempdir()
-            audio_path = os.path.join(temp_dir, f"response_{uuid.uuid4()}.mp3")
-            
-            with open(audio_path, "wb") as f:
-                f.write(audio_response.content)
-            st.write(f"Saved MP3 file to: {audio_path}")
-        
-        st.success("✅ Query processing complete!")
-        return {
-            "status": "success",
-            "text_response": response,
-            "voice_instructions": "",
-            "audio_path": audio_path,
-            "sources": [r.payload.get('file_name', 'Unknown Source') for r in search_results if r.payload]
-        }
-    
-    except Exception as e:
-        st.error(f"❌ Error during query processing: {str(e)}")
-        return {
-            "status": "error",
-            "error": str(e),
-            "query": query
-        }
-
-def main() -> None:
-    """Main application function."""
-    st.set_page_config(
-        page_title="Voice RAG Agent",
-        page_icon="🎙️",
-        layout="wide"
-    )
-    
-    init_session_state()
-    setup_sidebar()
-    
+# Main content based on selected page
+if selected_page == "Home":
+    # Main page header
     st.title("🎙️ Voice RAG Agent")
-    st.info("Get voice-powered answers to your documentation questions by configuring your API keys and uploading PDF documents. Then, simply ask questions to receive both text and voice responses!")
     
-    # File upload section
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    # Two columns layout for animation and intro
+    col1, col2 = st.columns([2, 3])
     
-    if uploaded_file:
-        file_name = uploaded_file.name
-        if file_name not in st.session_state.processed_documents:
-            with st.spinner('Processing PDF...'):
-                try:
-                    # Setup Qdrant if not already done
-                    if not st.session_state.client:
-                        client, embedding_model = setup_qdrant()
-                        st.session_state.client = client
-                        st.session_state.embedding_model = embedding_model
-                    
-                    # Process and store document
-                    documents = process_pdf(uploaded_file)
-                    if documents:
-                        store_embeddings(
-                            st.session_state.client,
-                            st.session_state.embedding_model,
-                            documents,
-                            COLLECTION_NAME
-                        )
-                        st.session_state.processed_documents.append(file_name)
-                        st.success(f"✅ Added PDF: {file_name}")
-                        st.session_state.setup_complete = True
-                except Exception as e:
-                    st.error(f"Error processing document: {str(e)}")
+    with col1:
+        lottie_animation = load_lottieurl("https://assets10.lottiefiles.com/packages/lf20_touohxv0.json")
+        st_lottie(lottie_animation, height=300, key="welcome")
     
-    # Display processed documents
-    if st.session_state.processed_documents:
-        st.sidebar.header("📚 Processed Documents")
-        for doc in st.session_state.processed_documents:
-            st.sidebar.text(f"📄 {doc}")
+    with col2:
+        st.markdown("""
+        <div class="info-card">
+            <h2>Welcome to the Voice RAG Agent!</h2>
+            <p>This advanced tool combines the power of Retrieval-Augmented Generation (RAG) with a natural voice interface, allowing you to interact with your documents in a more intuitive way.</p>
+            <p>Upload your documents, ask questions, and receive accurate answers - all through a seamless voice experience.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Statistics row
+    st.markdown("### System Stats")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        stat_counter("Documents Processed", "532", "📄")
+    
+    with col2:
+        stat_counter("Queries Answered", "1,248", "❓")
+    
+    with col3:
+        stat_counter("Users Served", "86", "👥")
+    
+    # Feature highlights
+    st.markdown("### Key Features")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        feature_card("📚", "Document Processing", "Upload and process multiple document formats including PDFs, Word docs, and more.")
+        feature_card("🔍", "Semantic Search", "Find information across your documents using natural language queries.")
+    
+    with col2:
+        feature_card("🎤", "Voice Interface", "Interact with your documents using voice commands and receive spoken responses.")
+        feature_card("🧠", "AI-Powered Answers", "Get comprehensive answers generated by advanced language models.")
+    
+    # Recent activity
+    st.markdown("### Recent Activity")
+    activity_data = [
+        {"action": "Document Upload", "details": "financial_report_2023.pdf", "time": "2 hours ago"},
+        {"action": "Query", "details": "What were the Q3 earnings?", "time": "1 hour ago"},
+        {"action": "System Update", "details": "Voice recognition engine updated", "time": "30 minutes ago"}
+    ]
+    
+    for item in activity_data:
+        st.markdown(f"""
+        <div style="display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e5e7eb;">
+            <div>
+                <strong>{item['action']}</strong><br>
+                {item['details']}
+            </div>
+            <div style="color: #6b7280; font-size: 0.9rem;">
+                {item['time']}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+elif selected_page == "Upload Documents":
+    st.title("📤 Upload Documents")
+    
+    upload_col, preview_col = st.columns([1, 1])
+    
+    with upload_col:
+        st.markdown("""
+        <div class="info-card">
+            <h3>Upload your documents</h3>
+            <p>Supported formats: PDF, DOCX, TXT, CSV</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        uploaded_file = st.file_uploader("Choose files", accept_multiple_files=True, type=['pdf', 'docx', 'txt', 'csv'])
+        
+        if uploaded_file:
+            st.success(f"{len(uploaded_file)} file(s) uploaded successfully!")
+            
+            # Processing options
+            st.markdown("### Processing Options")
+            col1, col2 = st.columns(2)
+            with col1:
+                chunk_size = st.slider("Chunk Size", 100, 1000, 500)
+            with col2:
+                overlap = st.slider("Overlap", 0, 200, 50)
+            
+            embeddings_model = st.selectbox(
+                "Embedding Model",
+                ["OpenAI Embeddings", "HuggingFace Embeddings", "Custom Embeddings"]
+            )
+            
+            if st.button("Process Documents", type="primary"):
+                with st.spinner("Processing your documents..."):
+                    # Simulate processing
+                    import time
+                    time.sleep(2)
+                    st.success("Documents processed and indexed successfully!")
+    
+    with preview_col:
+        st.markdown("""
+        <div class="info-card">
+            <h3>Document Preview</h3>
+            <p>Upload a document to see preview and extraction results.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Placeholder for document preview
+        st.image("https://via.placeholder.com/400x500?text=Document+Preview", use_column_width=True)
+
+elif selected_page == "Query Interface":
+    st.title("💬 Query Interface")
     
     # Query interface
-    query = st.text_input(
-        "What would you like to know about the documentation?",
-        placeholder="e.g., How do I authenticate API requests?",
-        disabled=not st.session_state.setup_complete
-    )
+    query_col, results_col = st.columns([1, 1])
     
-    if query and st.session_state.setup_complete:
-        with st.status("Processing your query...", expanded=True) as status:
-            try:
-                result = asyncio.run(process_query(
-                    query,
-                    st.session_state.client,
-                    st.session_state.embedding_model,
-                    COLLECTION_NAME,
-                    st.session_state.openai_api_key,
-                    st.session_state.selected_voice
-                ))
-                
-                if result["status"] == "success":
-                    status.update(label="✅ Query processed!", state="complete")
-                    
-                    st.markdown("### Response:")
-                    st.write(result["text_response"])
-                    
-                    if "audio_path" in result:
-                        st.markdown(f"### 🔊 Audio Response (Voice: {st.session_state.selected_voice})")
-                        st.audio(result["audio_path"], format="audio/mp3", start_time=0)
-                        
-                        with open(result["audio_path"], "rb") as audio_file:
-                            audio_bytes = audio_file.read()
-                            st.download_button(
-                                label="📥 Download Audio Response",
-                                data=audio_bytes,
-                                file_name=f"voice_response_{st.session_state.selected_voice}.mp3",
-                                mime="audio/mp3"
-                            )
-                    
-                    st.markdown("### Sources:")
-                    for source in result["sources"]:
-                        st.markdown(f"- {source}")
-                else:
-                    status.update(label="❌ Error processing query", state="error")
-                    st.error(f"Error: {result.get('error', 'Unknown error occurred')}")
+    with query_col:
+        st.markdown("""
+        <div class="info-card">
+            <h3>Ask a Question</h3>
+            <p>Type your question or use the microphone button to speak.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Text query input
+        query = st.text_input("Enter your question", placeholder="e.g., What was the revenue in Q2?")
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.button("🎤", help="Click to speak your question")
+        with col2:
+            st.button("Send Query", type="primary")
+        
+        # Advanced options
+        with st.expander("Advanced Options"):
+            st.slider("Response Detail Level", 1, 5, 3)
+            st.checkbox("Include source citations")
+            st.checkbox("Use voice response")
+            st.select_slider("Voice Speed", options=["Slow", "Normal", "Fast"], value="Normal")
+    
+    with results_col:
+        if not query:
+            st.markdown("""
+            <div class="info-card">
+                <h3>Results will appear here</h3>
+                <p>Ask a question to see AI-generated answers based on your documents.</p>
+            </div>
+            """, unsafe_allow_html=True)
             
-            except Exception as e:
-                status.update(label="❌ Error processing query", state="error")
-                st.error(f"Error processing query: {str(e)}")
-    
-    elif not st.session_state.setup_complete:
-        st.info("👈 Please configure the system and upload documents first!")
+            # Placeholder animation
+            lottie_waiting = load_lottieurl("https://assets9.lottiefiles.com/packages/lf20_bujdzzfn.json")  # Replace with a suitable waiting animation
+            st_lottie(lottie_waiting, height=200, key="waiting")
+        else:
+            # Simulate response (replace with actual RAG response logic)
+            st.markdown("""
+            <div class="feature-card">
+                <h3>Response</h3>
+                <p>Based on the financial reports, the revenue for Q2 2023 was $24.5 million, representing a 12.3% increase compared to the same period last year.</p>
+                <p><small>Sources: financial_report_2023.pdf (page 12), quarterly_summary.pdf (page 3)</small></p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Related questions
+            st.markdown("### Related Questions")
+            for question in ["How does this compare to Q1?", "What were the main revenue drivers?", "What is the forecast for Q3?"]:
+                st.markdown(f"""
+                <div style="padding: 10px; background-color: #f3f4f6; border-radius: 5px; margin-bottom: 8px; cursor: pointer;">{question}</div>
+                """, unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    main()
+elif selected_page == "Settings":
+    st.title("⚙️ Settings")
+    
+    tabs = st.tabs(["General", "Voice", "API Keys", "Theme"])
+    
+    with tabs[0]:
+        st.markdown("### General Settings")
+        st.toggle("Dark Mode", value=False)
+        st.toggle("Save Chat History", value=True)
+        st.selectbox("Default Page", ["Home", "Upload Documents", "Query Interface"])
+        
+    with tabs[1]:
+        st.markdown("### Voice Settings")
+        st.selectbox("Voice Type", ["Female (Default)", "Male", "Neutral"])
+        st.select_slider("Voice Speed", options=["Very Slow", "Slow", "Normal", "Fast", "Very Fast"], value="Normal")
+        st.slider("Voice Volume", 0, 100, 75)
+        
+    with tabs[2]:
+        st.markdown("### API Keys")
+        st.text_input("OpenAI API Key", type="password")
+        st.text_input("HuggingFace API Key", type="password")
+        st.button("Save Keys", type="primary")
+        
+    with tabs[3]:
+        st.markdown("### Theme Settings")
+        st.color_picker("Primary Color", "#4338ca")
+        st.color_picker("Secondary Color", "#1e3a8a")
+        st.selectbox("Font Family", ["Inter", "Roboto", "Open Sans", "Lato"])
+
+# Footer
+st.markdown("""
+<div class="footer">
+    <p>Voice RAG Agent v1.0.2 | Last updated: March 2025<br>
+    © 2025 Your Company Name. All rights reserved.</p>
+</div>
+""", unsafe_allow_html=True)

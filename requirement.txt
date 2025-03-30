@@ -1,0 +1,11 @@
+transformers
+sentence-transformers
+fastembed
+qdrant-client
+streamlit
+torch
+torchaudio
+langchain
+langchain-community
+pdfminer.six
+pymupdf
